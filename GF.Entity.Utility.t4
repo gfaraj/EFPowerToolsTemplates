@@ -1,0 +1,71 @@
+<#@ include file="C:\Users\gfaraj\Documents\Visual Studio 2010\Projects\EFTests\EFTestPower4\CodeTemplates\GF.Entity.Inflector.t4" #>
+<#@ assembly name="System.Core" #>
+<#@ assembly name="System.Data" #>
+<#@ assembly name="System.Xml" #>
+<#@ import namespace="System.IO" #>
+<#@ import namespace="System.Linq" #>
+<#@ import namespace="System.Text" #>
+<#@ import namespace="System.Text.RegularExpressions" #>
+<#+
+	public static class GFEntityUtility
+	{
+		private static readonly Regex sanitizeRegex = new Regex(@"[^\w\d_]", RegexOptions.Compiled);
+
+		public static string SanitizeDbName(string str)
+		{
+			if (str.Length == 0)
+			{
+				return str;
+			}
+			else
+			{
+				var sb = new StringBuilder();
+				bool replacedCharacter = false;
+			
+				for(int n = 0; n < str.Length; ++n)
+				{
+					char c = str[n];
+					if (c != '_' && (char.IsSymbol(c) || char.IsPunctuation(c)))
+					{
+						int ascii = c;
+						sb.AppendFormat("{0}", ascii);
+						replacedCharacter = true;
+						continue;
+					}
+					sb.Append(c);
+				}
+				if (replacedCharacter)
+				{
+					str = sb.ToString();
+				}
+
+				str = sanitizeRegex.Replace(str, "");
+				if(char.IsDigit(str[0]))
+				{
+					str = "C" + str;
+				}
+
+				return str;
+			}
+		}
+
+		public static string CreateEntityName(string tableName)
+		{
+			tableName = SanitizeDbName(tableName);
+			tableName = GFEntityInflector.MakeSingular(tableName);
+			tableName = GFEntityInflector.ToTitleCase(tableName).Replace(" ", "").Replace("$", "");
+
+			return tableName;
+		}
+
+		private static readonly Regex propertyCleanRegex = new Regex("^(event|Equals|GetHashCode|GetType|ToString|repo|Save|IsNew|Insert|Update|Delete|Exists|SingleOrDefault|Single|First|FirstOrDefault|Fetch|Page|Query)$");
+
+		public static string CreatePropertyName(string columnName)
+		{
+			columnName = SanitizeDbName(columnName);
+			columnName = propertyCleanRegex.Replace(columnName, "_$1");
+			columnName = GFEntityInflector.ToTitleCase(columnName).Replace(" ", "");
+			return columnName;
+		}
+	}
+#>
