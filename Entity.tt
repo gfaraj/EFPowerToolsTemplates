@@ -1,73 +1,190 @@
 <#@ template hostspecific="true" language="C#" #>
-<#@ include file="EF.Utility.CS.ttinclude" #><#@
- output extension=".cs" #><#
-
-    var efHost = (EfTextTemplateHost)Host;
-    var code = new CodeGenerationTools(this);
+<#@ include file="C:\Users\gfaraj\Documents\Visual Studio 2010\Projects\EFTests\EFTestPower4\CodeTemplates\GF.Entity.Utility.t4" #>
+<#@ include file="EF.Utility.CS.ttinclude" #>
+<#@ output extension=".cs" #>
+<#
+	var efHost = (EfTextTemplateHost)Host;
+	var code = new CodeGenerationTools(this);
 #>
 using System;
 using System.Collections.Generic;
+using System.ComponentModel.DataAnnotations;
+<# 
+	if (efHost.EntityFrameworkVersion >= new Version(4, 4))
+	{
+		WriteLine("using System.ComponentModel.DataAnnotations.Schema;");
+	}
+#>
 
 namespace <#= code.EscapeNamespace(efHost.Namespace) #>
 {
-    public partial class <#= efHost.EntityType.Name #>
-    {
 <#
-    var collectionNavigations = efHost.EntityType.NavigationProperties.Where(
-        np => np.DeclaringType == efHost.EntityType
-            && np.ToEndMember.RelationshipMultiplicity == RelationshipMultiplicity.Many);
+	var tableSet = efHost.TableSet;
+	var tableName = (string)tableSet.MetadataProperties["Table"].Value ?? tableSet.Name;
+	var entityName = GFEntityUtility.CreateEntityName(tableName);
 
-    // Add a ctor to initialize any collections
-    if (collectionNavigations.Any())
-    {
+	var schemaName = (string)tableSet.MetadataProperties["Schema"].Value;
+	schemaName = string.IsNullOrWhiteSpace(schemaName) ? "dbo" : schemaName;
+
+	if (entityName != tableName || schemaName != "dbo")
+	{
 #>
-        public <#= code.Escape(efHost.EntityType) #>()
-        {
+	[Table("<#= tableName #>"<#= schemaName != "dbo" ? ", Schema=\"" + schemaName + "\"" : "" #>)]
 <#
-        foreach (var navProperty in collectionNavigations)
-        {
+	}
 #>
-            this.<#= code.Escape(navProperty) #> = new List<<#= code.Escape(navProperty.ToEndMember.GetEntityType()) #>>();
+	public partial class <#= entityName #>
+	{
 <#
-        }
+	var collectionNavigations = efHost.EntityType.NavigationProperties.Where(
+		np => np.DeclaringType == efHost.EntityType
+			&& np.ToEndMember.RelationshipMultiplicity == RelationshipMultiplicity.Many
+	);
+
+	// Add a ctor to initialize any collections
+	if (collectionNavigations.Any())
+	{
 #>
-        }
+		public <#= code.Escape(entityName) #>()
+		{
+<#
+		foreach (var navProperty in collectionNavigations)
+		{
+			var propertyType = navProperty.ToEndMember.GetEntityType();
+			var propertyTypeName = GFEntityUtility.CreateEntityName(propertyType);
+#>
+			this.<#= code.Escape(navProperty) #> = new List<<#= code.Escape(propertyTypeName) #>>();
+<#
+		}
+#>
+		}
 
 <#
-    }
+	}
         
-    foreach (var property in efHost.EntityType.Properties)
-    {
-        var typeUsage = code.Escape(property.TypeUsage);
+	foreach (var property in efHost.EntityType.Properties)
+	{
+		var storeProp = efHost.PropertyToColumnMappings[property];
+		var sgpFacet = storeProp.TypeUsage.Facets.SingleOrDefault(f => f.Name == "StoreGeneratedPattern");
+		var columnName = efHost.PropertyToColumnMappings[property].Name;
+		var propertyName = GFEntityUtility.CreatePropertyName(columnName);
+		var storeGeneratedPattern = sgpFacet == null ? StoreGeneratedPattern.None : (StoreGeneratedPattern)sgpFacet.Value;
+		var type = (PrimitiveType)property.TypeUsage.EdmType;
+		var fixedLengthFacet = (Facet)property.TypeUsage.Facets.SingleOrDefault(f => f.Name == "FixedLength");
+		var maxLengthFacet = (Facet)property.TypeUsage.Facets.SingleOrDefault(f => f.Name == "MaxLength");
+		
+		var attributes = new List<string>();
+		
+		// WRT the primary key, a given column can be:
+		// 1) part of the primary key, primary key is a single column
+		// 2) part of the primary key, primary key is multiple columns
+		// 3) not part of the primary key
+		// In addition, the column may separately need to have the column name specified due to the 
+		// convention name not matching. This leads to 6 possible combinations that must be dealt 
+		// with together, since the 'Column' attribute is used for both specifying column name and
+		// column ordering for multi-column primary keys.
+		
+		var columnNameShouldBeSpecified = code.Escape(propertyName) != columnName;
+		var isPartOfPrimaryKey = efHost.EntityType.KeyMembers.Contains(property);
+		var primaryKeyHasMultipleColumns = efHost.EntityType.KeyMembers.Count > 1;
+		
+		if (isPartOfPrimaryKey)
+		{
+			if (primaryKeyHasMultipleColumns)
+			{
+				var columnNumber = efHost.EntityType.KeyMembers.IndexOf(property);
+				if (columnNameShouldBeSpecified)
+				{
+					attributes.Add(String.Format("[Key, Column(\"{0}\", Order = {1})]", columnName, columnNumber));
+				}
+				else
+				{
+					attributes.Add(String.Format("[Key, Column(Order = {0})]", columnNumber));
+				}
+			}
+			else
+			{
+				attributes.Add("[Key]");
+			}
+		}
+		else if (columnNameShouldBeSpecified)
+		{
+			// not part of primary key, so we can just emit the single column attribute if needed
+			attributes.Add(String.Format("[Column(\"{0}\")]", columnName));
+		}
 
-        // Fix-up spatial types for EF6
-        if (efHost.EntityFrameworkVersion >= new Version(6, 0)
-            && typeUsage.StartsWith("System.Data.Spatial."))
-        {
-            typeUsage = typeUsage.Replace(
-                "System.Data.Spatial.",
-                "System.Data.Entity.Spatial.");
-        }
-#>
-        <#= Accessibility.ForProperty(property) #> <#= typeUsage #> <#= code.Escape(property) #> { get; set; }
-<#
-    }
+		// logic based on EF Power Tools Beta2 Mapping.tt
+		if (type.ClrEquivalentType == typeof(string) || type.ClrEquivalentType == typeof(byte[]))
+		{
+			if (!property.Nullable && storeGeneratedPattern == StoreGeneratedPattern.None)
+			{
+				attributes.Add("[Required]");
+			}
+		
+		  if (maxLengthFacet != null && !maxLengthFacet.IsUnbounded)
+		  {
+			  attributes.Add(String.Format("[MaxLength({0})]", maxLengthFacet.Value));
+			  if (fixedLengthFacet != null && (bool)fixedLengthFacet.Value) //If IsFixed then MinLength = MaxLength 
+			  {
+					attributes.Add(String.Format("[MinLength({0})]", maxLengthFacet.Value));
+			  }
+			
+			  if (storeGeneratedPattern == StoreGeneratedPattern.Computed
+					&& type.ClrEquivalentType == typeof(byte[])
+					&& (int)maxLengthFacet.Value == 8)
+			  {
+					attributes.Add("[Timestamp]");
+			  }
+		  }
+		}
 
-    foreach (var navProperty in efHost.EntityType.NavigationProperties.Where(np => np.DeclaringType == efHost.EntityType))
-    {
-        if (navProperty.ToEndMember.RelationshipMultiplicity == RelationshipMultiplicity.Many)
-        {
+		// logic based on EF Power Tools Beta2 Mapping.tt
+		var conventionStoreGeneratedPattern = StoreGeneratedPattern.None;
+		if (isPartOfPrimaryKey && primaryKeyHasMultipleColumns == false)
+		{
+			if (type.ClrEquivalentType == typeof(int)
+				|| type.ClrEquivalentType == typeof(decimal)
+				|| type.ClrEquivalentType == typeof(short)
+				|| type.ClrEquivalentType == typeof(long))
+			{
+  			conventionStoreGeneratedPattern = StoreGeneratedPattern.Identity;
+			}
+		}
+		
+		if (storeGeneratedPattern != conventionStoreGeneratedPattern)
+		{
+			attributes.Add(String.Format("[DatabaseGenerated(DatabaseGeneratedOption.{0})]", storeGeneratedPattern));
+		}
+
+		PushIndent(new string(' ', 8));
+		foreach (var attribute in attributes)
+		{
+		    WriteLine(attribute);
+		}
+		ClearIndent();
 #>
-        public virtual ICollection<<#= code.Escape(navProperty.ToEndMember.GetEntityType()) #>> <#= code.Escape(navProperty) #> { get; set; }
+		<#= Accessibility.ForProperty(property) #> <#= code.Escape(property.TypeUsage) #> <#= code.Escape(propertyName) #> { get; set; }
 <#
-        }
-        else
-        {
+	}
+
+	foreach (var navProperty in efHost.EntityType.NavigationProperties.Where(np => np.DeclaringType == efHost.EntityType))
+	{
+		var propertyType = navProperty.ToEndMember.GetEntityType();
+		var propertyTypeName = GFEntityUtility.CreateEntityName(propertyType);
+		
+		if (navProperty.ToEndMember.RelationshipMultiplicity == RelationshipMultiplicity.Many)
+		{	
 #>
-        public virtual <#= code.Escape(navProperty.ToEndMember.GetEntityType()) #> <#= code.Escape(navProperty) #> { get; set; }
+			public virtual ICollection<<#= code.Escape(propertyTypeName) #>> <#= code.Escape(navProperty) #> { get; set; }
 <#
-        }
-    }
+		}
+		else
+		{
 #>
-    }
+			public virtual <#= code.Escape(propertyTypeName) #> <#= code.Escape(navProperty) #> { get; set; }
+<#
+		}
+	}
+#>
+	}
 }
